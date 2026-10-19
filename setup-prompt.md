@@ -20,7 +20,7 @@ Ask me these questions, using your question tool if you have one (at most 4 per 
 2. **How often** should changes be committed (and pushed, if synced)? **Once a day** (ask the time, default 12:00), **every hour**, or **after every single Claude action** (a hook after each response; most current, many small commits). Pulling always happens at every Claude start. Recommended: once a day.
 3. **Who makes the commits** (only if synced)? **A bot** (commits authored as "Knowledgebase Bot", pushed with an access token / PAT that only has access to this one repo, so they do not count as my activity) or **me** (my own git name and email, pushed with the login I already use for git: credential manager, `gh`/`glab` auth or SSH key). Recommended: bot.
 4. **What may be stored**: **content only** (projects, code, decisions, bugs, lessons; no personal names or emails) or **content + personal information** (also a `Me.md` profile with my role, skills, preferences and working style, and people I work with by name and role)? Secrets, passwords, tokens and customer data are never stored either way. Recommended: content only.
-5. **Claude setup backup**: Should my Claude Code setup itself be saved in the vault as well (`Claude/backup/`: settings.json, CLAUDE.md, own commands, agents, hooks and skills, list of plugins, marketplaces and MCP servers; secrets redacted; with personal information also Claude's memory)? It is rewritten on every sync and restores with one script after a reinstall. Recommended: yes.
+5. **Claude setup backup**: Should my Claude Code setup itself be saved in the vault as well (`Claude/backup/`: settings.json, CLAUDE.md, own commands, agents, hooks and skills, list of plugins, marketplaces and MCP servers; secrets redacted; with personal information also Claude's memory)? It is rewritten on every sync and restores with one script after a reinstall. Known token formats and every env/args/header value are redacted, but a script of mine with a hard-coded custom secret would be copied as is, so mention that. Recommended: yes, if my secrets live in env vars or files outside `~/.claude`.
 6. **Language** for the note text (file names and structure stay English). Default: the language I write to you in.
 7. **Repo name** (only if synced), default `knowledgebase`, and whether Obsidian is already installed.
 
@@ -1354,7 +1354,7 @@ Ask me these questions, using your question tool if you have one (at most 4 per 
 2. **How often** should changes be committed (and pushed, if synced)? **Once a day** (ask the time, default 12:00), **every hour**, or **after every single Claude action** (a hook after each response; most current, many small commits). Pulling always happens at every Claude start. Recommended: once a day.
 3. **Who makes the commits** (only if synced)? **A bot** (commits authored as "Knowledgebase Bot", pushed with an access token / PAT that only has access to this one repo, so they do not count as my activity) or **me** (my own git name and email, pushed with the login I already use for git: credential manager, `gh`/`glab` auth or SSH key). Recommended: bot.
 4. **What may be stored**: **content only** (projects, code, decisions, bugs, lessons; no personal names or emails) or **content + personal information** (also a `Me.md` profile with my role, skills, preferences and working style, and people I work with by name and role)? Secrets, passwords, tokens and customer data are never stored either way. Recommended: content only.
-5. **Claude setup backup**: Should my Claude Code setup itself be saved in the vault as well (`Claude/backup/`: settings.json, CLAUDE.md, own commands, agents, hooks and skills, list of plugins, marketplaces and MCP servers; secrets redacted; with personal information also Claude's memory)? It is rewritten on every sync and restores with one script after a reinstall. Recommended: yes.
+5. **Claude setup backup**: Should my Claude Code setup itself be saved in the vault as well (`Claude/backup/`: settings.json, CLAUDE.md, own commands, agents, hooks and skills, list of plugins, marketplaces and MCP servers; secrets redacted; with personal information also Claude's memory)? It is rewritten on every sync and restores with one script after a reinstall. Known token formats and every env/args/header value are redacted, but a script of mine with a hard-coded custom secret would be copied as is, so mention that. Recommended: yes, if my secrets live in env vars or files outside `~/.claude`.
 6. **Language** for the note text (file names and structure stay English). Default: the language I write to you in.
 7. **Repo name** (only if synced), default `knowledgebase`, and whether Obsidian is already installed.
 
@@ -1529,7 +1529,9 @@ include:
 
 Saved: CLAUDE.md, settings.json, commands/, agents/, output-styles/, hooks/, own skills (not symlinked ones),
 plugin + marketplace lists, user MCP servers, and memory when KB_PRIVACY=personal.
-Never saved: credentials, history, sessions, caches, plugin code. Restore: setup/restore-claude.sh
+Never saved: credentials, history, sessions, caches, plugin code. Known token formats are redacted in every file,
+but a script with a custom secret is copied as is: keep secrets in env vars or files outside ~/.claude.
+Restore: setup/restore-claude.sh
 Usage: python3 setup/claude-backup.py <vault>/Claude/backup
 """
 import json
@@ -1544,6 +1546,11 @@ OUT = sys.argv[1]
 DIRS = ["commands", "agents", "output-styles", "hooks"]
 MAX_BYTES = 512 * 1024
 SECRET_KEY = re.compile(r"token|secret|password|passwd|api[_-]?key|auth|credential|cookie|private", re.I)
+# Value patterns of common credentials, redacted in every copied file regardless of where they appear
+SECRET_VALUE = re.compile(
+    r"sk-ant-[\w-]{10,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|glpat-[\w-]{20,}"
+    r"|xox[abprs]-[\w-]{10,}|AKIA[0-9A-Z]{16}|AIza[\w-]{30,}|(?i:bearer)\s+[\w.~+/=-]{16,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")
 SKIP_NAMES = {".git", "node_modules", "__pycache__", ".venv", "venv", ".DS_Store"}
 
 
@@ -1559,13 +1566,28 @@ def config():
     return conf
 
 
-def redact(value, key=""):
-    """Keeps structure, blanks every value under env/headers and every key that looks like a secret."""
+def scrub(text):
+    return SECRET_VALUE.sub("<redacted>", text)
+
+
+def blank(value):
     if isinstance(value, dict):
-        return {k: ("<redacted>" if (key in ("env", "headers") or SECRET_KEY.search(k)) and not isinstance(v, (dict, list))
-                    else redact(v, k)) for k, v in value.items()}
+        return {k: blank(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [blank(v) for v in value]
+    return "<redacted>"
+
+
+def redact(value, key=""):
+    """Keeps structure, blanks everything under env/headers/args or a secret-looking key, strips URL queries."""
+    if key in ("env", "headers", "args") or SECRET_KEY.search(key):
+        return blank(value)
+    if isinstance(value, dict):
+        return {k: redact(v, k) for k, v in value.items()}
     if isinstance(value, list):
         return [redact(v, key) for v in value]
+    if isinstance(value, str):
+        return scrub(re.sub(r"(https?://[^\s?#]*)[?#]\S*", r"\1?<redacted>", re.sub(r"://[^/@\s]+@", "://<redacted>@", value)))
     return value
 
 
@@ -1573,7 +1595,7 @@ def write(rel, text):
     path = os.path.join(OUT, rel)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+        f.write(scrub(text))
 
 
 def copy_tree(src, rel):
@@ -1937,12 +1959,12 @@ if [ "$OS" = wsl ]; then
     ok "Windows Task Scheduler: $([ "$KB_SYNC" = daily ] && echo "daily at $KB_SYNC_TIME" || echo hourly), catches up if the PC was off"
   fi
 else
-  { crontab -l 2>/dev/null | grep -v 'kb-sync.sh' || true; } > "${TMPDIR:-/tmp}/kb-cron.$$"
   case "$KB_SYNC" in
-    daily)  echo "$((10#$M)) $((10#$H)) * * * $CMD" >> "${TMPDIR:-/tmp}/kb-cron.$$";;
-    hourly) echo "0 * * * * $CMD" >> "${TMPDIR:-/tmp}/kb-cron.$$";;
+    daily)  LINE="$((10#$M)) $((10#$H)) * * * $CMD";;
+    hourly) LINE="0 * * * * $CMD";;
+    action) LINE="";;
   esac
-  crontab "${TMPDIR:-/tmp}/kb-cron.$$"; rm -f "${TMPDIR:-/tmp}/kb-cron.$$"
+  { crontab -l 2>/dev/null | grep -v 'kb-sync.sh' || true; [ -z "$LINE" ] || echo "$LINE"; } | crontab -
   case "$KB_SYNC" in daily) ok "cron: daily at $KB_SYNC_TIME";; hourly) ok "cron: hourly";; action) ok "No cron job (sync runs after every Claude response)";; esac
 fi
 
@@ -2040,7 +2062,7 @@ mkdir -p "$CLAUDE_DIR"
 info "1/4 Files (existing ones are kept)"
 for d in commands agents output-styles hooks skills; do
   [ -d "$BACKUP/$d" ] || continue
-  mkdir -p "$CLAUDE_DIR/$d" && cp -rn "$BACKUP/$d/." "$CLAUDE_DIR/$d/" && ok "$d"
+  mkdir -p "$CLAUDE_DIR/$d" && cp -rn "$BACKUP/$d/." "$CLAUDE_DIR/$d/" 2>/dev/null && ok "$d"
 done
 find "$CLAUDE_DIR/hooks" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null
 if [ -f "$BACKUP/CLAUDE.md" ] && [ ! -s "$CLAUDE_DIR/CLAUDE.md" ]; then
@@ -2049,7 +2071,7 @@ else warn "CLAUDE.md exists, kept; compare with $BACKUP/CLAUDE.md by hand"; fi
 if [ -d "$BACKUP/memory" ]; then
   for p in "$BACKUP"/memory/*/; do
     n="$(basename "$p")"; mkdir -p "$CLAUDE_DIR/projects/$n/memory"
-    cp -rn "$p." "$CLAUDE_DIR/projects/$n/memory/"
+    cp -rn "$p." "$CLAUDE_DIR/projects/$n/memory/" 2>/dev/null
   done
   ok "memory"
 fi
